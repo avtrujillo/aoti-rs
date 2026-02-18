@@ -1,27 +1,18 @@
 #pragma once
 
 #include "rust/cxx.h"
+#include <torch/csrc/inductor/aoti_package/model_package_loader.h>
 #include <memory>
 #include <cstdint>
 
-namespace torch::inductor {
-class AOTIModelPackageLoader;
-}
-
+// Shared structs (TensorPtr, OwnedTensor, MetadataEntry) are defined by
+// the cxx code generator from the Rust bridge declaration.  We only need
+// forward declarations here so the function signatures below compile.
 namespace aoti_rs {
 
-struct TensorPtr {
-    const void* ptr;
-};
-
-struct OwnedTensor {
-    void* ptr;
-};
-
-struct MetadataEntry {
-    rust::String key;
-    rust::String value;
-};
+struct TensorPtr;
+struct OwnedTensor;
+struct MetadataEntry;
 
 std::unique_ptr<torch::inductor::AOTIModelPackageLoader> loader_new(
     rust::Str model_package_path,

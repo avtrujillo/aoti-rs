@@ -1,6 +1,5 @@
-#include "aoti.h"
+#include "aoti-rs/src/lib.rs.h"
 #include <torch/torch.h>
-#include <torch/csrc/inductor/aoti_package/model_package_loader.h>
 #include <string>
 #include <vector>
 
