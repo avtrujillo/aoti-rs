@@ -5,12 +5,18 @@ use tch::Tensor;
 
 #[cxx::bridge(namespace = "aoti_rs")]
 mod ffi {
+    #[namespace = ""]
+    unsafe extern "C++" {
+        include!("csrc/cvoid.h");
+        type c_void;
+    }
+
     struct TensorPtr {
-        ptr: usize,
+        ptr: *const c_void,
     }
 
     struct OwnedTensor {
-        ptr: usize,
+        ptr: *mut c_void,
     }
 
     struct MetadataEntry {
@@ -66,7 +72,7 @@ fn tensors_to_ptrs(tensors: &[Tensor]) -> Vec<ffi::TensorPtr> {
     tensors
         .iter()
         .map(|t| ffi::TensorPtr {
-            ptr: t.as_ptr() as usize,
+            ptr: t.as_ptr() as *const ffi::c_void,
         })
         .collect()
 }
@@ -81,7 +87,6 @@ fn owned_to_tensors(owned: Vec<ffi::OwnedTensor>) -> Vec<Tensor> {
     owned
         .into_iter()
         .map(|ot| unsafe { Tensor::from_ptr(ot.ptr as *mut _) })
-
         .collect()
 }
 

@@ -28,7 +28,7 @@ rust::Vec<OwnedTensor> loader_run(
     for (const auto& t : inputs) {
         // The pointer is a const at::Tensor* from tch-rs (via torch-sys).
         // tch::Tensor is a repr(C) wrapper around *mut C_tensor, which is at::Tensor.
-        const at::Tensor* tensor_ptr = reinterpret_cast<const at::Tensor*>(static_cast<uintptr_t>(t.ptr));
+        const at::Tensor* tensor_ptr = reinterpret_cast<const at::Tensor*>(t.ptr);
         cpp_inputs.push_back(*tensor_ptr);
     }
 
@@ -40,7 +40,7 @@ rust::Vec<OwnedTensor> loader_run(
         // Heap-allocate each output tensor so Rust can own it via a raw pointer.
         at::Tensor* heap_tensor = new at::Tensor(std::move(out));
         OwnedTensor ot;
-        ot.ptr = reinterpret_cast<size_t>(heap_tensor);
+        ot.ptr = static_cast<void*>(heap_tensor);
         result.push_back(ot);
     }
     return result;
@@ -52,7 +52,7 @@ rust::Vec<OwnedTensor> loader_boxed_run(
     std::vector<at::Tensor> cpp_inputs;
     cpp_inputs.reserve(inputs.size());
     for (const auto& t : inputs) {
-        const at::Tensor* tensor_ptr = reinterpret_cast<const at::Tensor*>(static_cast<uintptr_t>(t.ptr));
+        const at::Tensor* tensor_ptr = reinterpret_cast<const at::Tensor*>(t.ptr);
         cpp_inputs.push_back(*tensor_ptr);
     }
 
@@ -63,7 +63,7 @@ rust::Vec<OwnedTensor> loader_boxed_run(
     for (auto& out : outputs) {
         at::Tensor* heap_tensor = new at::Tensor(std::move(out));
         OwnedTensor ot;
-        ot.ptr = reinterpret_cast<size_t>(heap_tensor);
+        ot.ptr = static_cast<void*>(heap_tensor);
         result.push_back(ot);
     }
     return result;
