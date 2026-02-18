@@ -1,27 +1,53 @@
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
+
+/// Try to find the torch package root via Python (same as LIBTORCH_USE_PYTORCH in torch-sys).
+fn find_torch_from_python() -> Option<PathBuf> {
+    let output = Command::new("python3")
+        .args(["-c", "import torch; print(torch.__file__)"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let torch_init = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    // torch.__file__ is e.g. /path/to/site-packages/torch/__init__.py
+    PathBuf::from(torch_init).parent().map(|p| p.to_path_buf())
+}
 
 fn main() {
-    // Locate libtorch. We check the same environment variables that torch-sys uses,
-    // plus DEP_TCH_LIBTORCH_LIB which torch-sys exports to dependent crates.
-    let libtorch = env::var("LIBTORCH")
-        .map(PathBuf::from)
-        .ok();
+    // Locate libtorch. We try, in order:
+    // 1. Explicit LIBTORCH / LIBTORCH_INCLUDE / LIBTORCH_LIB env vars
+    // 2. DEP_TCH_LIBTORCH_LIB exported by torch-sys (derive include from ../include)
+    // 3. LIBTORCH_USE_PYTORCH: find torch via Python import
+    let libtorch = env::var("LIBTORCH").map(PathBuf::from).ok();
+
+    // Try to get the lib dir from torch-sys or derive from LIBTORCH
+    let dep_lib = env::var("DEP_TCH_LIBTORCH_LIB").map(PathBuf::from).ok();
+
+    // If we have DEP_TCH_LIBTORCH_LIB, derive the torch root (lib dir's parent)
+    let torch_root_from_dep = dep_lib.as_ref().and_then(|lib| lib.parent().map(|p| p.to_path_buf()));
+
+    // As a last resort, find torch via Python
+    let torch_from_python = find_torch_from_python();
+
+    // Resolve the effective torch root directory
+    let torch_root = libtorch
+        .as_ref()
+        .or(torch_root_from_dep.as_ref())
+        .or(torch_from_python.as_ref());
 
     let libtorch_include = env::var("LIBTORCH_INCLUDE")
         .map(PathBuf::from)
-        .or_else(|_| libtorch.as_ref()
-            .map(|p| p.join("include"))
-            .ok_or(()))
-        .ok();
+        .ok()
+        .or_else(|| torch_root.map(|p| p.join("include")));
 
     let libtorch_lib = env::var("LIBTORCH_LIB")
         .map(PathBuf::from)
-        .or_else(|_| env::var("DEP_TCH_LIBTORCH_LIB").map(PathBuf::from))
-        .or_else(|_| libtorch.as_ref()
-            .map(|p| p.join("lib"))
-            .ok_or(()))
-        .ok();
+        .ok()
+        .or(dep_lib)
+        .or_else(|| torch_root.map(|p| p.join("lib")));
 
     let include_dirs: Vec<PathBuf> = if let Some(ref inc) = libtorch_include {
         // libtorch ships headers under include/ and include/torch/csrc/api/include/
@@ -35,7 +61,7 @@ fn main() {
         panic!(
             "Cannot find libtorch include directory. \
              Set the LIBTORCH environment variable to your libtorch installation, \
-             or set LIBTORCH_INCLUDE directly."
+             set LIBTORCH_INCLUDE directly, or ensure PyTorch is installed in Python."
         );
     };
 
@@ -43,7 +69,7 @@ fn main() {
         panic!(
             "Cannot find libtorch lib directory. \
              Set the LIBTORCH environment variable to your libtorch installation, \
-             or set LIBTORCH_LIB directly."
+             set LIBTORCH_LIB directly, or ensure PyTorch is installed in Python."
         );
     });
 
@@ -88,4 +114,5 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH");
     println!("cargo:rerun-if-env-changed=LIBTORCH_INCLUDE");
     println!("cargo:rerun-if-env-changed=LIBTORCH_LIB");
+    println!("cargo:rerun-if-env-changed=LIBTORCH_USE_PYTORCH");
 }
