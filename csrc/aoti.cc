@@ -107,9 +107,13 @@ rust::Vec<rust::String> loader_get_constant_fqns(
 rust::Vec<MetadataEntry> loader_load_metadata_from_package(
     rust::Str model_package_path,
     rust::Str model_name) {
-    auto metadata = torch::inductor::AOTIModelPackageLoader::load_metadata_from_package(
-        std::string(model_package_path),
-        std::string(model_name));
+    // Instantiate a loader just to read metadata.  This works across all
+    // PyTorch versions (the static `load_metadata_from_package` was only
+    // added in PyTorch 2.10+).
+    std::string pkg_path(model_package_path);
+    std::string name(model_name);
+    torch::inductor::AOTIModelPackageLoader loader(pkg_path, name);
+    auto metadata = loader.get_metadata();
     rust::Vec<MetadataEntry> result;
     result.reserve(metadata.size());
     for (const auto& [k, v] : metadata) {
