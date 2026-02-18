@@ -11,11 +11,11 @@ class AOTIModelPackageLoader;
 namespace aoti_rs {
 
 struct TensorPtr {
-    const void* ptr;
+    size_t ptr;
 };
 
 struct OwnedTensor {
-    void* ptr;
+    size_t ptr;
 };
 
 struct MetadataEntry {
