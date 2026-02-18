@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::pin::Pin;
 
@@ -149,7 +150,7 @@ impl AOTIModelBuilder {
             self.num_runners,
             self.device_index,
         )?;
-        Ok(AOTIModel { inner })
+        Ok(AOTIModel { inner: UnsafeCell::new(inner) })
     }
 }
 
@@ -168,7 +169,7 @@ impl AOTIModelBuilder {
 /// let outputs = model.run(&[input]).unwrap();
 /// ```
 pub struct AOTIModel {
-    inner: cxx::UniquePtr<ffi::AOTIModelPackageLoader>,
+    inner: UnsafeCell<cxx::UniquePtr<ffi::AOTIModelPackageLoader>>,
 }
 
 // Safety: AOTIModelPackageLoader manages its own thread safety via num_runners.
@@ -187,18 +188,21 @@ impl AOTIModel {
         AOTIModelBuilder::new(model_package_path)
     }
 
+    /// Obtain a `Pin<&mut AOTIModelPackageLoader>` from the inner `UnsafeCell`.
+    ///
+    /// # Safety
+    /// Caller must ensure no aliasing mutable references exist.
+    unsafe fn pin_inner(&self) -> Pin<&mut ffi::AOTIModelPackageLoader> {
+        unsafe { (*self.inner.get()).pin_mut() }
+    }
+
     /// Run inference on the given input tensors.
     ///
     /// Input tensors must match the shapes, dtypes, and device used during
     /// model export.
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, cxx::Exception> {
         let ptrs = tensors_to_ptrs(inputs);
-        // Safety: we hold a &self borrow so the loader is alive for the duration.
-        // Pin is required by cxx for mutable C++ references.
-        let inner_mut = unsafe {
-            Pin::new_unchecked(&mut *(self.inner.as_ref().unwrap() as *const _ as *mut _))
-        };
-        let owned = ffi::loader_run(inner_mut, &ptrs)?;
+        let owned = ffi::loader_run(unsafe { self.pin_inner() }, &ptrs)?;
         Ok(owned_to_tensors(owned))
     }
 
@@ -206,10 +210,7 @@ impl AOTIModel {
     /// for potential in-place optimization.
     pub fn boxed_run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, cxx::Exception> {
         let mut ptrs = tensors_to_ptrs(inputs);
-        let inner_mut = unsafe {
-            Pin::new_unchecked(&mut *(self.inner.as_ref().unwrap() as *const _ as *mut _))
-        };
-        let owned = ffi::loader_boxed_run(inner_mut, &mut ptrs)?;
+        let owned = ffi::loader_boxed_run(unsafe { self.pin_inner() }, &mut ptrs)?;
         Ok(owned_to_tensors(owned))
     }
 
@@ -217,27 +218,18 @@ impl AOTIModel {
     ///
     /// Typical keys include `"AOTI_DEVICE_KEY"` indicating the target device.
     pub fn get_metadata(&self) -> Result<HashMap<String, String>, cxx::Exception> {
-        let inner_mut = unsafe {
-            Pin::new_unchecked(&mut *(self.inner.as_ref().unwrap() as *const _ as *mut _))
-        };
-        let entries = ffi::loader_get_metadata(inner_mut)?;
+        let entries = ffi::loader_get_metadata(unsafe { self.pin_inner() })?;
         Ok(entries_to_map(entries))
     }
 
     /// Get the call specification strings for the model.
     pub fn get_call_spec(&self) -> Result<Vec<String>, cxx::Exception> {
-        let inner_mut = unsafe {
-            Pin::new_unchecked(&mut *(self.inner.as_ref().unwrap() as *const _ as *mut _))
-        };
-        ffi::loader_get_call_spec(inner_mut)
+        ffi::loader_get_call_spec(unsafe { self.pin_inner() })
     }
 
     /// Get the fully qualified names of all constants in the model.
     pub fn get_constant_fqns(&self) -> Result<Vec<String>, cxx::Exception> {
-        let inner_mut = unsafe {
-            Pin::new_unchecked(&mut *(self.inner.as_ref().unwrap() as *const _ as *mut _))
-        };
-        ffi::loader_get_constant_fqns(inner_mut)
+        ffi::loader_get_constant_fqns(unsafe { self.pin_inner() })
     }
 
     /// Load metadata from a model package without fully loading the model.
