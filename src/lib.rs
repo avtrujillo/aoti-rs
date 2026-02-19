@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::pin::Pin;
 
 use tch::Tensor;
 
@@ -187,38 +186,24 @@ impl AOTIModel {
         AOTIModelBuilder::new(model_package_path)
     }
 
-    /// Obtain a `Pin<&mut AOTIModelPackageLoader>` from the inner `UnsafeCell`.
-    ///
-    /// # Safety
-    /// Caller must ensure no aliasing mutable references exist.
-    fn pin_inner(&mut self) -> Option<Pin<&mut ffi::AOTIModelPackageLoader>> {
-        self.inner.as_mut()
-    }
-
-    fn try_pin_inner(&mut self) -> Result<Pin<&mut ffi::AOTIModelPackageLoader>, AOTIModelError> {
-        self.pin_inner().ok_or(
-            AOTIModelError::InnerNone
-        )
-    }
-
     /// Run inference on the given input tensors.
     ///
     /// Input tensors must match the shapes, dtypes, and device used during
     /// model export.
-    pub fn run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>, AOTIModelError> {
+    pub fn run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>, cxx::Exception> {
         let ptrs = tensors_to_ptrs(inputs);
         let owned = ffi::loader_run(
-            self.try_pin_inner()?, &ptrs
+            self.inner.pin_mut(), &ptrs
         )?;
         Ok(owned_to_tensors(owned))
     }
 
     /// Run inference, allowing the runtime to take ownership of input tensors
     /// for potential in-place optimization.
-    pub fn boxed_run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>, AOTIModelError> {
+    pub fn boxed_run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>, cxx::Exception> {
         let mut ptrs = tensors_to_ptrs(inputs);
         let owned = ffi::loader_boxed_run(
-            self.try_pin_inner()?,
+            self.inner.pin_mut(),
             &mut ptrs
         )?;
         Ok(owned_to_tensors(owned))
@@ -227,21 +212,21 @@ impl AOTIModel {
     /// Get model metadata as a key-value map.
     ///
     /// Typical keys include `"AOTI_DEVICE_KEY"` indicating the target device.
-    pub fn get_metadata(&mut self) -> Result<HashMap<String, String>, AOTIModelError> {
+    pub fn get_metadata(&mut self) -> Result<HashMap<String, String>, cxx::Exception> {
         let entries = ffi::loader_get_metadata(
-            self.try_pin_inner()?
+            self.inner.pin_mut()
         )?;
         Ok(entries_to_map(entries))
     }
 
     /// Get the call specification strings for the model.
-    pub fn get_call_spec(&mut self) -> Result<Vec<String>, AOTIModelError> {
-        Ok(ffi::loader_get_call_spec(self.try_pin_inner()?)?)
+    pub fn get_call_spec(&mut self) -> Result<Vec<String>, cxx::Exception> {
+        Ok(ffi::loader_get_call_spec(self.inner.pin_mut())?)
     }
 
     /// Get the fully qualified names of all constants in the model.
-    pub fn get_constant_fqns(&mut self) -> Result<Vec<String>, AOTIModelError> {
-        Ok(ffi::loader_get_constant_fqns(self.try_pin_inner()?)?)
+    pub fn get_constant_fqns(&mut self) -> Result<Vec<String>, cxx::Exception> {
+        Ok(ffi::loader_get_constant_fqns(self.inner.pin_mut())?)
     }
 
     /// Load metadata from a model package without fully loading the model.
@@ -254,12 +239,4 @@ impl AOTIModel {
         let entries = ffi::loader_load_metadata_from_package(model_package_path, model_name)?;
         Ok(entries_to_map(entries))
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum AOTIModelError {
-    #[error("AOTIModel's inner field was empty")]
-    InnerNone,
-    #[error("CXX exception: {0}")]
-    Cxx(#[from] cxx::Exception)
 }
