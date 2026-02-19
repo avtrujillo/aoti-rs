@@ -125,19 +125,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH_LIB");
     println!("cargo:rerun-if-env-changed=LIBTORCH_USE_PYTORCH");
 
-    // Create stable symlinks under target/ so that the checked-in .clangd
-    // file can reference cxxbridge and libtorch headers via fixed relative
-    // paths (the actual OUT_DIR contains a hash that changes on clean builds).
+    // Create a stable symlink under target/ so that the checked-in .clangd
+    // file can reference libtorch headers via a fixed relative path.
+    // (cxx-build already creates target/cxxbridge/ with its own symlinks.)
     #[cfg(unix)]
     {
-        let target_dir = PathBuf::from(&manifest_dir).join("target");
-
-        // target/cxxbridge → $OUT_DIR/cxxbridge  (provides rust/cxx.h and aoti-rs/src/lib.rs.h)
-        let cxxbridge_src = PathBuf::from(env::var("OUT_DIR").unwrap()).join("cxxbridge");
-        force_symlink(&cxxbridge_src, &target_dir.join("cxxbridge"));
-
-        // target/libtorch → torch root  (provides include/torch/... headers)
         if let Some(root) = torch_root {
+            let target_dir = PathBuf::from(&manifest_dir).join("target");
             force_symlink(root, &target_dir.join("libtorch"));
         }
     }

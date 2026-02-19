@@ -1,7 +1,7 @@
 CompileFlags:
   Add:
     - --std=c++17
-    - -Itarget/cxxbridge/include
+    - -Itarget/cxxbridge
     - -Itarget/libtorch/include
     - -Itarget/libtorch/include/torch/csrc/api/include
     - -I.
