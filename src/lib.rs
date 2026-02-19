@@ -1,4 +1,3 @@
-use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::pin::Pin;
 
@@ -150,7 +149,7 @@ impl AOTIModelBuilder {
             self.num_runners,
             self.device_index,
         )?;
-        Ok(AOTIModel { inner: UnsafeCell::new(inner) })
+        Ok(AOTIModel { inner })
     }
 }
 
@@ -169,7 +168,7 @@ impl AOTIModelBuilder {
 /// let outputs = model.run(&[input]).unwrap();
 /// ```
 pub struct AOTIModel {
-    inner: UnsafeCell<cxx::UniquePtr<ffi::AOTIModelPackageLoader>>,
+    inner: cxx::UniquePtr<ffi::AOTIModelPackageLoader>,
 }
 
 // Safety: AOTIModelPackageLoader manages its own thread safety via num_runners.
@@ -192,44 +191,57 @@ impl AOTIModel {
     ///
     /// # Safety
     /// Caller must ensure no aliasing mutable references exist.
-    unsafe fn pin_inner(&self) -> Pin<&mut ffi::AOTIModelPackageLoader> {
-        unsafe { (*self.inner.get()).pin_mut() }
+    fn pin_inner(&mut self) -> Option<Pin<&mut ffi::AOTIModelPackageLoader>> {
+        self.inner.as_mut()
+    }
+
+    fn try_pin_inner(&mut self) -> Result<Pin<&mut ffi::AOTIModelPackageLoader>, AOTIModelError> {
+        self.pin_inner().ok_or(
+            AOTIModelError::InnerNone
+        )
     }
 
     /// Run inference on the given input tensors.
     ///
     /// Input tensors must match the shapes, dtypes, and device used during
     /// model export.
-    pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, cxx::Exception> {
+    pub fn run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>, AOTIModelError> {
         let ptrs = tensors_to_ptrs(inputs);
-        let owned = ffi::loader_run(unsafe { self.pin_inner() }, &ptrs)?;
+        let owned = ffi::loader_run(
+            self.try_pin_inner()?, &ptrs
+        )?;
         Ok(owned_to_tensors(owned))
     }
 
     /// Run inference, allowing the runtime to take ownership of input tensors
     /// for potential in-place optimization.
-    pub fn boxed_run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, cxx::Exception> {
+    pub fn boxed_run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>, AOTIModelError> {
         let mut ptrs = tensors_to_ptrs(inputs);
-        let owned = ffi::loader_boxed_run(unsafe { self.pin_inner() }, &mut ptrs)?;
+        let owned = ffi::loader_boxed_run(
+            self.try_pin_inner()?,
+            &mut ptrs
+        )?;
         Ok(owned_to_tensors(owned))
     }
 
     /// Get model metadata as a key-value map.
     ///
     /// Typical keys include `"AOTI_DEVICE_KEY"` indicating the target device.
-    pub fn get_metadata(&self) -> Result<HashMap<String, String>, cxx::Exception> {
-        let entries = ffi::loader_get_metadata(unsafe { self.pin_inner() })?;
+    pub fn get_metadata(&mut self) -> Result<HashMap<String, String>, AOTIModelError> {
+        let entries = ffi::loader_get_metadata(
+            self.try_pin_inner()?
+        )?;
         Ok(entries_to_map(entries))
     }
 
     /// Get the call specification strings for the model.
-    pub fn get_call_spec(&self) -> Result<Vec<String>, cxx::Exception> {
-        ffi::loader_get_call_spec(unsafe { self.pin_inner() })
+    pub fn get_call_spec(&mut self) -> Result<Vec<String>, AOTIModelError> {
+        Ok(ffi::loader_get_call_spec(self.try_pin_inner()?)?)
     }
 
     /// Get the fully qualified names of all constants in the model.
-    pub fn get_constant_fqns(&self) -> Result<Vec<String>, cxx::Exception> {
-        ffi::loader_get_constant_fqns(unsafe { self.pin_inner() })
+    pub fn get_constant_fqns(&mut self) -> Result<Vec<String>, AOTIModelError> {
+        Ok(ffi::loader_get_constant_fqns(self.try_pin_inner()?)?)
     }
 
     /// Load metadata from a model package without fully loading the model.
@@ -242,4 +254,12 @@ impl AOTIModel {
         let entries = ffi::loader_load_metadata_from_package(model_package_path, model_name)?;
         Ok(entries_to_map(entries))
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AOTIModelError {
+    #[error("AOTIModel's inner field was empty")]
+    InnerNone,
+    #[error("CXX exception: {0}")]
+    Cxx(#[from] cxx::Exception)
 }
