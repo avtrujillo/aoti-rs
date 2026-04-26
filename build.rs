@@ -2,6 +2,15 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Remove an existing symlink (or file) at `dst`, then create a new symlink
+/// pointing to `src`.  Errors are intentionally ignored – IDE symlinks are
+/// best-effort and must never break the build.
+#[cfg(unix)]
+fn force_symlink(src: &std::path::Path, dst: &std::path::Path) {
+    let _ = std::fs::remove_file(dst);
+    let _ = std::os::unix::fs::symlink(src, dst);
+}
+
 /// Try to find the torch package root via Python (same as LIBTORCH_USE_PYTORCH in torch-sys).
 fn find_torch_from_python() -> Option<PathBuf> {
     let output = Command::new("python3")
@@ -115,4 +124,15 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH_INCLUDE");
     println!("cargo:rerun-if-env-changed=LIBTORCH_LIB");
     println!("cargo:rerun-if-env-changed=LIBTORCH_USE_PYTORCH");
+
+    // Create a stable symlink under target/ so that the checked-in .clangd
+    // file can reference libtorch headers via a fixed relative path.
+    // (cxx-build already creates target/cxxbridge/ with its own symlinks.)
+    #[cfg(unix)]
+    {
+        if let Some(root) = torch_root {
+            let target_dir = PathBuf::from(&manifest_dir).join("target");
+            force_symlink(root, &target_dir.join("libtorch"));
+        }
+    }
 }
