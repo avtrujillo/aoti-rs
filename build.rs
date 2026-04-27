@@ -82,6 +82,13 @@ fn main() {
         );
     });
 
+    // Detect CUDA support: presence of libtorch_cuda.so in the lib dir.  Set
+    // AOTI_RS_NO_CUDA=1 to force a CPU-only build even when libtorch ships
+    // with CUDA support (useful for type-checking in environments without
+    // CUDA headers installed).
+    let force_no_cuda = env::var_os("AOTI_RS_NO_CUDA").is_some();
+    let has_cuda = !force_no_cuda && lib_dir.join("libtorch_cuda.so").exists();
+
     // Build the C++ bridge via cxx
     let mut build = cxx_build::bridge("src/lib.rs");
     build
@@ -89,6 +96,10 @@ fn main() {
         .std("c++17")
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-missing-field-initializers");
+
+    if has_cuda {
+        build.define("USE_CUDA", None);
+    }
 
     for dir in &include_dirs {
         build.include(dir);
@@ -107,9 +118,7 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=torch_cpu");
     println!("cargo:rustc-link-lib=dylib=c10");
 
-    // Optionally link CUDA libs if available
-    let torch_cuda = lib_dir.join("libtorch_cuda.so");
-    if torch_cuda.exists() {
+    if has_cuda {
         println!("cargo:rustc-link-lib=dylib=torch_cuda");
     }
 
@@ -124,6 +133,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH_INCLUDE");
     println!("cargo:rerun-if-env-changed=LIBTORCH_LIB");
     println!("cargo:rerun-if-env-changed=LIBTORCH_USE_PYTORCH");
+    println!("cargo:rerun-if-env-changed=AOTI_RS_NO_CUDA");
 
     // Create a stable symlink under target/ so that the checked-in .clangd
     // file can reference libtorch headers via a fixed relative path.

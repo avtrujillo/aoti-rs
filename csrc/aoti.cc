@@ -1,26 +1,57 @@
 #include "aoti-rs/src/lib.rs.h"
 #include <torch/torch.h>
+#include <torch/csrc/inductor/aoti_runner/model_container_runner_cpu.h>
+#ifdef USE_CUDA
+#include <torch/csrc/inductor/aoti_runner/model_container_runner_cuda.h>
+#endif
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace aoti_rs {
 
-std::unique_ptr<torch::inductor::AOTIModelPackageLoader> loader_new(
-    rust::Str model_package_path,
-    rust::Str model_name,
-    bool run_single_threaded,
+std::unique_ptr<torch::inductor::AOTIModelContainerRunner> runner_new(
+    rust::Str model_so_path,
+    rust::Str cubin_dir,
+    bool is_cuda,
+    int8_t device_index,
     size_t num_runners,
-    int8_t device_index) {
-    return std::make_unique<torch::inductor::AOTIModelPackageLoader>(
-        std::string(model_package_path),
-        std::string(model_name),
-        run_single_threaded,
-        num_runners,
-        static_cast<c10::DeviceIndex>(device_index));
+    bool run_single_threaded) {
+    std::string so_path(model_so_path);
+    std::string cubin(cubin_dir);
+
+    if (is_cuda) {
+#ifdef USE_CUDA
+        std::string device_str = "cuda";
+        if (device_index >= 0) {
+            device_str += ":" + std::to_string(static_cast<int>(device_index));
+        }
+        return std::unique_ptr<torch::inductor::AOTIModelContainerRunner>(
+            new torch::inductor::AOTIModelContainerRunnerCuda(
+                so_path,
+                num_runners,
+                device_str,
+                cubin,
+                run_single_threaded));
+#else
+        throw std::runtime_error(
+            "aoti-rs was built without CUDA support; cannot construct "
+            "AOTIModelContainerRunnerCuda");
+#endif
+    }
+
+    // CPU: AOTIModelContainerRunnerCpu takes (model_so_path, num_models,
+    // run_single_threaded) in PyTorch 2.9.  cubin_dir / device_index aren't
+    // meaningful on CPU.
+    (void)cubin;
+    (void)device_index;
+    return std::unique_ptr<torch::inductor::AOTIModelContainerRunner>(
+        new torch::inductor::AOTIModelContainerRunnerCpu(
+            so_path, num_runners, run_single_threaded));
 }
 
-rust::Vec<OwnedTensor> loader_run(
-    torch::inductor::AOTIModelPackageLoader& loader,
+rust::Vec<OwnedTensor> runner_run(
+    torch::inductor::AOTIModelContainerRunner& runner,
     const rust::Vec<TensorPtr>& inputs) {
     std::vector<at::Tensor> cpp_inputs;
     cpp_inputs.reserve(inputs.size());
@@ -31,7 +62,7 @@ rust::Vec<OwnedTensor> loader_run(
         cpp_inputs.push_back(*tensor_ptr);
     }
 
-    std::vector<at::Tensor> outputs = loader.run(cpp_inputs);
+    std::vector<at::Tensor> outputs = runner.run(cpp_inputs);
 
     rust::Vec<OwnedTensor> result;
     result.reserve(outputs.size());
@@ -45,8 +76,8 @@ rust::Vec<OwnedTensor> loader_run(
     return result;
 }
 
-rust::Vec<OwnedTensor> loader_boxed_run(
-    torch::inductor::AOTIModelPackageLoader& loader,
+rust::Vec<OwnedTensor> runner_boxed_run(
+    torch::inductor::AOTIModelContainerRunner& runner,
     rust::Vec<TensorPtr>& inputs) {
     std::vector<at::Tensor> cpp_inputs;
     cpp_inputs.reserve(inputs.size());
@@ -55,7 +86,7 @@ rust::Vec<OwnedTensor> loader_boxed_run(
         cpp_inputs.push_back(*tensor_ptr);
     }
 
-    std::vector<at::Tensor> outputs = loader.boxed_run(std::move(cpp_inputs));
+    std::vector<at::Tensor> outputs = runner.boxed_run(std::move(cpp_inputs));
 
     rust::Vec<OwnedTensor> result;
     result.reserve(outputs.size());
@@ -68,23 +99,9 @@ rust::Vec<OwnedTensor> loader_boxed_run(
     return result;
 }
 
-rust::Vec<MetadataEntry> loader_get_metadata(
-    torch::inductor::AOTIModelPackageLoader& loader) {
-    auto metadata = loader.get_metadata();
-    rust::Vec<MetadataEntry> result;
-    result.reserve(metadata.size());
-    for (const auto& [k, v] : metadata) {
-        MetadataEntry entry;
-        entry.key = rust::String(k);
-        entry.value = rust::String(v);
-        result.push_back(std::move(entry));
-    }
-    return result;
-}
-
-rust::Vec<rust::String> loader_get_call_spec(
-    torch::inductor::AOTIModelPackageLoader& loader) {
-    auto specs = loader.get_call_spec();
+rust::Vec<rust::String> runner_get_call_spec(
+    torch::inductor::AOTIModelContainerRunner& runner) {
+    auto specs = runner.get_call_spec();
     rust::Vec<rust::String> result;
     result.reserve(specs.size());
     for (const auto& s : specs) {
@@ -93,34 +110,13 @@ rust::Vec<rust::String> loader_get_call_spec(
     return result;
 }
 
-rust::Vec<rust::String> loader_get_constant_fqns(
-    torch::inductor::AOTIModelPackageLoader& loader) {
-    auto fqns = loader.get_constant_fqns();
+rust::Vec<rust::String> runner_get_constant_fqns(
+    torch::inductor::AOTIModelContainerRunner& runner) {
+    auto fqns = runner.getConstantNamesToOriginalFQNs();
     rust::Vec<rust::String> result;
     result.reserve(fqns.size());
-    for (const auto& s : fqns) {
-        result.push_back(rust::String(s));
-    }
-    return result;
-}
-
-rust::Vec<MetadataEntry> loader_load_metadata_from_package(
-    rust::Str model_package_path,
-    rust::Str model_name) {
-    // Instantiate a loader just to read metadata.  This works across all
-    // PyTorch versions (the static `load_metadata_from_package` was only
-    // added in PyTorch 2.10+).
-    std::string pkg_path(model_package_path);
-    std::string name(model_name);
-    torch::inductor::AOTIModelPackageLoader loader(pkg_path, name);
-    auto metadata = loader.get_metadata();
-    rust::Vec<MetadataEntry> result;
-    result.reserve(metadata.size());
-    for (const auto& [k, v] : metadata) {
-        MetadataEntry entry;
-        entry.key = rust::String(k);
-        entry.value = rust::String(v);
-        result.push_back(std::move(entry));
+    for (const auto& kv : fqns) {
+        result.push_back(rust::String(kv.second));
     }
     return result;
 }
