@@ -11,6 +11,32 @@ fn force_symlink(src: &std::path::Path, dst: &std::path::Path) {
     let _ = std::os::unix::fs::symlink(src, dst);
 }
 
+/// Look for a directory containing `cuda_runtime_api.h`.  Checked in order:
+/// `CUDA_HOME` / `CUDA_PATH` / `CUDA_ROOT`, then common system install
+/// locations.  We deliberately don't probe pip's `nvidia-*-cuXX` wheels —
+/// those split the toolkit across many wheels and finding one header doesn't
+/// mean the rest will resolve.
+fn find_cuda_include() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    for var in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
+        if let Ok(v) = env::var(var) {
+            candidates.push(PathBuf::from(&v).join("include"));
+        }
+    }
+    for p in [
+        "/usr/local/cuda/include",
+        "/opt/cuda/include",
+        "/usr/include/cuda",
+    ] {
+        candidates.push(PathBuf::from(p));
+    }
+
+    candidates
+        .into_iter()
+        .find(|p| p.join("cuda_runtime_api.h").exists())
+}
+
 /// Try to find the torch package root via Python (same as LIBTORCH_USE_PYTORCH in torch-sys).
 fn find_torch_from_python() -> Option<PathBuf> {
     let output = Command::new("python3")
@@ -89,6 +115,17 @@ fn main() {
     let force_no_cuda = env::var_os("AOTI_RS_NO_CUDA").is_some();
     let has_cuda = !force_no_cuda && lib_dir.join("libtorch_cuda.so").exists();
 
+    // When libtorch is CUDA-enabled, model_container_runner_cuda.h transitively
+    // pulls in c10/cuda/CUDAStream.h -> cuda_runtime_api.h, which ships with
+    // the CUDA toolkit (not libtorch).  Try to find the toolkit's include dir
+    // so the user doesn't have to set CUDA_HOME manually if it's in a standard
+    // location.
+    let cuda_include = if has_cuda {
+        find_cuda_include()
+    } else {
+        None
+    };
+
     // Build the C++ bridge via cxx
     let mut build = cxx_build::bridge("src/lib.rs");
     build
@@ -99,6 +136,23 @@ fn main() {
 
     if has_cuda {
         build.define("USE_CUDA", None);
+        if let Some(ref cuda_inc) = cuda_include {
+            build.include(cuda_inc);
+        } else {
+            // Don't fail the build here: the system compiler might still find
+            // cuda_runtime_api.h on its default include path (e.g. when CUDA
+            // is installed via the OS package manager into /usr/include).
+            // If it can't, the cc invocation will fail with a clear "fatal
+            // error: cuda_runtime_api.h: No such file or directory" — and
+            // the warning below tells the user how to fix it.
+            println!(
+                "cargo:warning=libtorch ships libtorch_cuda.so but no CUDA \
+                 toolkit include dir was found.  If the build fails on \
+                 cuda_runtime_api.h, install the CUDA toolkit and set \
+                 CUDA_HOME (or CUDA_PATH), or set AOTI_RS_NO_CUDA=1 to \
+                 build a CPU-only runner."
+            );
+        }
     }
 
     for dir in &include_dirs {
@@ -134,6 +188,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH_LIB");
     println!("cargo:rerun-if-env-changed=LIBTORCH_USE_PYTORCH");
     println!("cargo:rerun-if-env-changed=AOTI_RS_NO_CUDA");
+    println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=CUDA_ROOT");
 
     // Create a stable symlink under target/ so that the checked-in .clangd
     // file can reference libtorch headers via a fixed relative path.
