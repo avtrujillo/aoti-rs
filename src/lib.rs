@@ -144,6 +144,14 @@ pub trait Device: sealed::Sealed + 'static {
 
     /// Whether a runtime `tch::Device` belongs to this device kind.
     fn matches(device: tch::Device) -> bool;
+
+    /// Extract the typed model from an [`AnyAOTIModel`] if its variant is
+    /// `Self`. Implementation detail of [`AnyAOTIModel::try_into_typed`];
+    /// call that instead.
+    #[doc(hidden)]
+    fn model_from_any(any: AnyAOTIModel) -> Result<AOTIModel<Self>, Error>
+    where
+        Self: Sized;
 }
 
 /// Marker type for CPU (host RAM) placement.
@@ -163,6 +171,17 @@ impl Device for Cpu {
     fn matches(device: tch::Device) -> bool {
         device == tch::Device::Cpu
     }
+
+    fn model_from_any(any: AnyAOTIModel) -> Result<AOTIModel<Cpu>, Error> {
+        match any {
+            AnyAOTIModel::Cpu(model) => Ok(model),
+            #[cfg(aoti_cuda)]
+            AnyAOTIModel::Cuda(_) => Err(Error::ModelDeviceMismatch {
+                expected: Cpu::KEY,
+                found: Cuda::KEY.to_string(),
+            }),
+        }
+    }
 }
 
 impl Device for Cuda {
@@ -171,6 +190,17 @@ impl Device for Cuda {
 
     fn matches(device: tch::Device) -> bool {
         matches!(device, tch::Device::Cuda(_))
+    }
+
+    fn model_from_any(any: AnyAOTIModel) -> Result<AOTIModel<Cuda>, Error> {
+        match any {
+            #[cfg(aoti_cuda)]
+            AnyAOTIModel::Cuda(model) => Ok(model),
+            AnyAOTIModel::Cpu(_) => Err(Error::ModelDeviceMismatch {
+                expected: Cuda::KEY,
+                found: Cpu::KEY.to_string(),
+            }),
+        }
     }
 }
 
@@ -774,6 +804,25 @@ impl AnyAOTIModel {
                     .build()?,
             ))
         }
+    }
+
+    /// Extract the typed model, requiring it to be on device kind `D`.
+    ///
+    /// Returns [`Error::ModelDeviceMismatch`] if the loaded model is on a
+    /// different device. Unlike matching on the enum directly, this works in
+    /// code that is generic over [`Device`] (a `match` cannot narrow a type
+    /// parameter to a concrete type) and is portable across CPU-only and
+    /// CUDA-enabled builds (the `Cuda` variant only exists in the latter).
+    ///
+    /// ```no_run
+    /// use aoti_rs::{AnyAOTIModel, AOTIModel, Device};
+    ///
+    /// fn model_from_any<D: Device>(any: AnyAOTIModel) -> Result<AOTIModel<D>, aoti_rs::Error> {
+    ///     any.try_into_typed::<D>()
+    /// }
+    /// ```
+    pub fn try_into_typed<D: Device>(self) -> Result<AOTIModel<D>, Error> {
+        D::model_from_any(self)
     }
 }
 

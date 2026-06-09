@@ -82,6 +82,7 @@ Device placement (RAM vs VRAM) is tracked in the type system via a sealed
 - `AOTIModel::boxed_run(Vec<DeviceTensor<D>>)` — run giving the runtime ownership of inputs (enables in-place optimization)
 - `AOTIModel::get_metadata()`, `get_call_spec()`, `get_constant_fqns()` — introspection
 - `AnyAOTIModel::load(path)` / `load_named(path, name)` — runtime device dispatch
+- `AnyAOTIModel::try_into_typed::<D>()` — recover an `AOTIModel<D>` from the enum; works in `D`-generic code where a `match` can't narrow the type parameter
 - `load_metadata_from_package(path, name)` — free function, reads metadata without fully loading
 
 ### Key cxx bridge constraints
