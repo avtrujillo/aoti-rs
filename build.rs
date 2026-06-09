@@ -62,7 +62,9 @@ fn main() {
     let dep_lib = env::var("DEP_TCH_LIBTORCH_LIB").map(PathBuf::from).ok();
 
     // If we have DEP_TCH_LIBTORCH_LIB, derive the torch root (lib dir's parent)
-    let torch_root_from_dep = dep_lib.as_ref().and_then(|lib| lib.parent().map(|p| p.to_path_buf()));
+    let torch_root_from_dep = dep_lib
+        .as_ref()
+        .and_then(|lib| lib.parent().map(|p| p.to_path_buf()));
 
     // As a last resort, find torch via Python
     let torch_from_python = find_torch_from_python();
@@ -115,16 +117,20 @@ fn main() {
     let force_no_cuda = env::var_os("AOTI_RS_NO_CUDA").is_some();
     let has_cuda = !force_no_cuda && lib_dir.join("libtorch_cuda.so").exists();
 
+    // Expose CUDA availability to the Rust side as cfg(aoti_cuda) so that
+    // CUDA-only APIs (AOTIModelBuilder::<Cuda>::build, etc.) are compiled
+    // out — not just failing at runtime — when CUDA support is absent.
+    println!("cargo::rustc-check-cfg=cfg(aoti_cuda)");
+    if has_cuda {
+        println!("cargo:rustc-cfg=aoti_cuda");
+    }
+
     // When libtorch is CUDA-enabled, model_container_runner_cuda.h transitively
     // pulls in c10/cuda/CUDAStream.h -> cuda_runtime_api.h, which ships with
     // the CUDA toolkit (not libtorch).  Try to find the toolkit's include dir
     // so the user doesn't have to set CUDA_HOME manually if it's in a standard
     // location.
-    let cuda_include = if has_cuda {
-        find_cuda_include()
-    } else {
-        None
-    };
+    let cuda_include = if has_cuda { find_cuda_include() } else { None };
 
     // Build the C++ bridge via cxx
     let mut build = cxx_build::bridge("src/lib.rs");
