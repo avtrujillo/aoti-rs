@@ -64,6 +64,41 @@ fn any_model_dispatches_to_cpu() {
     }
 }
 
+#[test]
+fn any_model_converts_to_typed() {
+    use aoti_rs::Device;
+
+    // Generic context: a match can't narrow D to a concrete device type,
+    // so this is exactly what try_into_typed exists for.
+    fn model_from_any<D: Device>(any: AnyAOTIModel) -> Result<AOTIModel<D>, aoti_rs::Error> {
+        any.try_into_typed::<D>()
+    }
+
+    let path = pt2_path();
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("skipping: {path} does not exist");
+        return;
+    }
+    let any = AnyAOTIModel::load_named(&path, &model_name()).expect("load");
+    let mut model = model_from_any::<Cpu>(any).expect("typed conversion");
+    let outputs = model.run(&[cpu_input()]).expect("run");
+    assert_eq!(outputs.len(), 1);
+
+    #[cfg(aoti_cuda)]
+    {
+        use aoti_rs::{Cuda, Error};
+        let any = AnyAOTIModel::load_named(&path, &model_name()).expect("load");
+        match model_from_any::<Cuda>(any) {
+            Err(Error::ModelDeviceMismatch { expected, found }) => {
+                assert_eq!(expected, "cuda");
+                assert_eq!(found, "cpu");
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("CPU model must not convert to AOTIModel<Cuda>"),
+        }
+    }
+}
+
 // cfg(aoti_cuda) is emitted by build.rs for every target in this package,
 // so integration tests can gate on it too.
 #[cfg(aoti_cuda)]
