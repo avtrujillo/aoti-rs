@@ -82,8 +82,14 @@ rust::Vec<OwnedTensor> runner_boxed_run(
     std::vector<at::Tensor> cpp_inputs;
     cpp_inputs.reserve(inputs.size());
     for (const auto& t : inputs) {
-        const at::Tensor* tensor_ptr = reinterpret_cast<const at::Tensor*>(t.ptr);
-        cpp_inputs.push_back(*tensor_ptr);
+        // Rust passes the inputs by value (Vec<DeviceTensor<_>>), so each
+        // at::Tensor is exclusively owned by this call and we can move out
+        // of it.  That keeps the use count at 1, which is what lets
+        // boxed_run reuse input buffers in place.  Rust drops the empty
+        // shells after the call returns.
+        at::Tensor* tensor_ptr =
+            const_cast<at::Tensor*>(reinterpret_cast<const at::Tensor*>(t.ptr));
+        cpp_inputs.push_back(std::move(*tensor_ptr));
     }
 
     std::vector<at::Tensor> outputs = runner.boxed_run(std::move(cpp_inputs));
