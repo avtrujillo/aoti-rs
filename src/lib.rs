@@ -364,14 +364,30 @@ fn owned_to_tensors<D: Device>(owned: Vec<ffi::OwnedTensor>) -> Vec<DeviceTensor
         .collect()
 }
 
-/// Extract every non-directory entry of a `.pt2` archive into a fresh temp dir,
-/// using a Zip64-aware reader.  This bypasses libtorch's miniz-based extractor,
-/// which fails on archives whose internal `wrapper.so` pushes the central
-/// directory past the 32-bit Zip offset boundary.
+/// Extract every non-directory entry of a `.pt2` archive into a fresh temp dir.
+/// See [`extract_package`].
 fn extract_pt2(pt2_path: &str) -> Result<TempDir, Error> {
+    let dir = tempfile::tempdir()?;
+    extract_package(pt2_path, dir.path())?;
+    Ok(dir)
+}
+
+/// Extract every non-directory entry of a `.pt2` archive into `dest`, using a
+/// Zip64-aware reader.  This bypasses libtorch's miniz-based extractor, which
+/// fails on archives whose internal `wrapper.so` pushes the central directory
+/// past the 32-bit Zip offset boundary.
+///
+/// The result is the layout [`AOTIModelBuilder::from_extracted`] loads in
+/// place, so a package can be extracted once ahead of time instead of on every
+/// [`AOTIModelBuilder::new`] build. Any Zip64-aware extractor produces the same
+/// layout (Python's `zipfile.ZipFile.extractall` included); this one exists so
+/// Rust callers need nothing else.
+///
+/// Entries whose names would escape `dest` are rejected rather than written.
+pub fn extract_package(pt2_path: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<(), Error> {
+    let dest = dest.as_ref();
     let file = std::fs::File::open(pt2_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let dir = tempfile::tempdir()?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let name = entry.name().to_string();
@@ -379,17 +395,19 @@ fn extract_pt2(pt2_path: &str) -> Result<TempDir, Error> {
         if name.ends_with('/') {
             continue;
         }
-        let outpath = match entry.enclosed_name() {
-            Some(p) => dir.path().join(p),
-            None => dir.path().join(&name),
+        let Some(relative) = entry.enclosed_name() else {
+            return Err(Error::InvalidPath(format!(
+                "package entry '{name}' would extract outside the destination"
+            )));
         };
+        let outpath = dest.join(relative);
         if let Some(parent) = outpath.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut out = std::fs::File::create(&outpath)?;
         std::io::copy(&mut entry, &mut out)?;
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// Walk `root` recursively and return every file whose name matches `predicate`.
@@ -539,6 +557,32 @@ pub fn load_metadata_from_package(
     read_metadata_from_zip(model_package_path, model_name)
 }
 
+/// Load metadata from an already-extracted package directory (see
+/// [`extract_package`]) without loading the model.
+pub fn load_metadata_from_extracted(
+    extracted_dir: impl AsRef<Path>,
+    model_name: &str,
+) -> Result<HashMap<String, String>, Error> {
+    read_metadata_from_dir(extracted_dir.as_ref(), model_name)
+}
+
+/// Where an [`AOTIModelBuilder`] gets the model's files from.
+enum ModelSource {
+    /// A `.pt2` archive, extracted into a fresh temp dir on every build.
+    Package(String),
+    /// A directory holding an already-extracted package, loaded in place.
+    Extracted(PathBuf),
+}
+
+impl std::fmt::Display for ModelSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Package(path) => f.write_str(path),
+            Self::Extracted(dir) => write!(f, "{}", dir.display()),
+        }
+    }
+}
+
 /// Builder for configuring and creating an [`AOTIModel`].
 ///
 /// The device kind is part of the builder's type: `device_index` (a
@@ -546,7 +590,7 @@ pub fn load_metadata_from_package(
 /// `build()` for the CUDA variant only exists when the crate was built with
 /// CUDA support (`cfg(aoti_cuda)`).
 pub struct AOTIModelBuilder<D: Device> {
-    path: String,
+    source: ModelSource,
     model_name: String,
     run_single_threaded: bool,
     num_runners: usize,
@@ -556,9 +600,32 @@ pub struct AOTIModelBuilder<D: Device> {
 
 impl<D: Device> AOTIModelBuilder<D> {
     /// Create a builder for the given `.pt2` model package path.
+    ///
+    /// The package is extracted into a fresh temp dir when the model is
+    /// built, and the copy lives as long as the model does.
     pub fn new(model_package_path: impl Into<String>) -> Self {
+        Self::with_source(ModelSource::Package(model_package_path.into()))
+    }
+
+    /// Create a builder for a package that has already been extracted into
+    /// `extracted_dir` (by [`extract_package`] or any Zip64-aware extractor).
+    ///
+    /// The model is loaded in place: nothing is copied, and the runner maps
+    /// `wrapper.so` and reads `.cubin` kernels straight from `extracted_dir`.
+    /// For a multi-GB package that saves rewriting the whole package on every
+    /// load, and the page cache holds one clean copy of it rather than two.
+    ///
+    /// The directory must therefore stay in place, unmodified, for the
+    /// model's lifetime — kernels are read lazily during inference. It may be
+    /// read-only, but its filesystem must allow executable mappings (no
+    /// `noexec`), since `wrapper.so` is loaded as a shared library.
+    pub fn from_extracted(extracted_dir: impl Into<PathBuf>) -> Self {
+        Self::with_source(ModelSource::Extracted(extracted_dir.into()))
+    }
+
+    fn with_source(source: ModelSource) -> Self {
         Self {
-            path: model_package_path.into(),
+            source,
             model_name: "model".to_string(),
             run_single_threaded: false,
             num_runners: 1,
@@ -586,12 +653,28 @@ impl<D: Device> AOTIModelBuilder<D> {
         self
     }
 
-    /// Extract the package, validate its device metadata against `D`, and
-    /// construct the runner.
+    /// Extract the package (unless it already is), validate its device
+    /// metadata against `D`, and construct the runner.
     fn build_inner(self) -> Result<AOTIModel<D>, Error> {
-        let temp_dir = extract_pt2(&self.path)?;
-        let so_path = find_wrapper_so(temp_dir.path(), &self.model_name)?;
-        let metadata = read_metadata_from_dir(temp_dir.path(), &self.model_name)?;
+        let (root, temp_dir) = match self.source {
+            ModelSource::Package(path) => {
+                let temp_dir = extract_pt2(&path)?;
+                (temp_dir.path().to_path_buf(), Some(temp_dir))
+            }
+            ModelSource::Extracted(dir) => {
+                // Checked up front: otherwise a typo'd path surfaces as the
+                // much less obvious "no wrapper.so found".
+                if !dir.is_dir() {
+                    return Err(Error::InvalidPath(format!(
+                        "extracted package directory {} does not exist",
+                        dir.display()
+                    )));
+                }
+                (dir, None)
+            }
+        };
+        let so_path = find_wrapper_so(&root, &self.model_name)?;
+        let metadata = read_metadata_from_dir(&root, &self.model_name)?;
 
         // The type parameter decides which runner we construct; the package
         // metadata, when present, must agree with it.
@@ -674,7 +757,9 @@ pub struct AOTIModel<D: Device> {
     metadata: HashMap<String, String>,
     // The runner mmaps `wrapper.so` and reads `.cubin` kernel files lazily
     // during inference, so the extracted directory must outlive `inner`.
-    _temp_dir: TempDir,
+    // `None` when loaded in place via `from_extracted`, where keeping the
+    // directory alive is the caller's job.
+    _temp_dir: Option<TempDir>,
     _device: PhantomData<D>,
 }
 
@@ -688,6 +773,12 @@ impl AOTIModel<Cpu> {
     pub fn load(model_package_path: impl Into<String>) -> Result<Self, Error> {
         AOTIModelBuilder::<Cpu>::new(model_package_path).build()
     }
+
+    /// Load an already-extracted package in place, targeting the CPU with
+    /// default settings. See [`AOTIModelBuilder::from_extracted`].
+    pub fn load_extracted(extracted_dir: impl Into<PathBuf>) -> Result<Self, Error> {
+        AOTIModelBuilder::<Cpu>::from_extracted(extracted_dir).build()
+    }
 }
 
 #[cfg(aoti_cuda)]
@@ -696,12 +787,24 @@ impl AOTIModel<Cuda> {
     pub fn load(model_package_path: impl Into<String>) -> Result<Self, Error> {
         AOTIModelBuilder::<Cuda>::new(model_package_path).build()
     }
+
+    /// Load an already-extracted package in place, targeting CUDA with
+    /// default settings. See [`AOTIModelBuilder::from_extracted`].
+    pub fn load_extracted(extracted_dir: impl Into<PathBuf>) -> Result<Self, Error> {
+        AOTIModelBuilder::<Cuda>::from_extracted(extracted_dir).build()
+    }
 }
 
 impl<D: Device> AOTIModel<D> {
     /// Create a builder for more control over loading options.
     pub fn builder(model_package_path: impl Into<String>) -> AOTIModelBuilder<D> {
         AOTIModelBuilder::new(model_package_path)
+    }
+
+    /// Create a builder for an already-extracted package, loaded in place.
+    /// See [`AOTIModelBuilder::from_extracted`].
+    pub fn builder_extracted(extracted_dir: impl Into<PathBuf>) -> AOTIModelBuilder<D> {
+        AOTIModelBuilder::from_extracted(extracted_dir)
     }
 
     /// Run inference on the given input tensors.
@@ -777,6 +880,39 @@ impl AnyAOTIModel {
     /// `AOTI_DEVICE_KEY` metadata (missing metadata is treated as CPU).
     pub fn load_named(model_package_path: &str, model_name: &str) -> Result<Self, Error> {
         let metadata = read_metadata_from_zip(model_package_path, model_name)?;
+        Self::dispatch(
+            ModelSource::Package(model_package_path.to_string()),
+            &metadata,
+            model_name,
+        )
+    }
+
+    /// Load an already-extracted package in place, dispatching on its
+    /// `AOTI_DEVICE_KEY` metadata (missing metadata is treated as CPU). Uses
+    /// the default model name `"model"`. See
+    /// [`AOTIModelBuilder::from_extracted`] for what in-place loading requires
+    /// of the directory.
+    pub fn load_extracted(extracted_dir: impl Into<PathBuf>) -> Result<Self, Error> {
+        Self::load_extracted_named(extracted_dir, "model")
+    }
+
+    /// Load an already-extracted package in place by model name, dispatching
+    /// on its `AOTI_DEVICE_KEY` metadata (missing metadata is treated as CPU).
+    pub fn load_extracted_named(
+        extracted_dir: impl Into<PathBuf>,
+        model_name: &str,
+    ) -> Result<Self, Error> {
+        let dir = extracted_dir.into();
+        let metadata = read_metadata_from_dir(&dir, model_name)?;
+        Self::dispatch(ModelSource::Extracted(dir), &metadata, model_name)
+    }
+
+    /// Build the typed model `metadata` says `source` targets.
+    fn dispatch(
+        source: ModelSource,
+        metadata: &HashMap<String, String>,
+        model_name: &str,
+    ) -> Result<Self, Error> {
         let is_cuda = metadata
             .get("AOTI_DEVICE_KEY")
             .map(|v| device_kind(v) == Cuda::KEY)
@@ -786,7 +922,7 @@ impl AnyAOTIModel {
             #[cfg(aoti_cuda)]
             {
                 Ok(Self::Cuda(
-                    AOTIModel::<Cuda>::builder(model_package_path)
+                    AOTIModelBuilder::<Cuda>::with_source(source)
                         .model_name(model_name)
                         .build()?,
                 ))
@@ -794,12 +930,12 @@ impl AnyAOTIModel {
             #[cfg(not(aoti_cuda))]
             {
                 Err(Error::Model(format!(
-                    "'{model_package_path}' targets CUDA but aoti-rs was built without CUDA support"
+                    "'{source}' targets CUDA but aoti-rs was built without CUDA support"
                 )))
             }
         } else {
             Ok(Self::Cpu(
-                AOTIModel::<Cpu>::builder(model_package_path)
+                AOTIModelBuilder::<Cpu>::with_source(source)
                     .model_name(model_name)
                     .build()?,
             ))
