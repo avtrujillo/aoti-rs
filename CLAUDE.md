@@ -78,12 +78,14 @@ Device placement (RAM vs VRAM) is tracked in the type system via a sealed
 
 - `AOTIModel::<Cpu>::load(path)` / `AOTIModel::<Cuda>::load(path)` — quick load with defaults
 - `AOTIModel::<D>::builder(path)` — returns `AOTIModelBuilder<D>` for configuring `model_name`, `num_runners`, `single_threaded`, and (CUDA only) `device_index`
+- `AOTIModel::<D>::load_extracted(dir)` / `builder_extracted(dir)` (= `AOTIModelBuilder::from_extracted`) — load an already-extracted package **in place**: no temp-dir copy, so a multi-GB package isn't rewritten on every load and the page cache holds one copy instead of two. The directory must outlive the model (kernels are read lazily) and allow executable mappings (no `noexec`); read-only is fine
+- `extract_package(pt2, dest)` — the Zip64-aware extractor, producing the layout `from_extracted` expects (Python's `zipfile.extractall` produces the same one). Rejects entries that would escape `dest`
 - `AOTIModel::run(&[DeviceTensor<D>])` — runs inference, returns `Vec<DeviceTensor<D>>`
 - `AOTIModel::boxed_run(Vec<DeviceTensor<D>>)` — run giving the runtime ownership of inputs (enables in-place optimization)
 - `AOTIModel::get_metadata()`, `get_call_spec()`, `get_constant_fqns()` — introspection
-- `AnyAOTIModel::load(path)` / `load_named(path, name)` — runtime device dispatch
+- `AnyAOTIModel::load(path)` / `load_named(path, name)` — runtime device dispatch; `load_extracted(dir)` / `load_extracted_named(dir, name)` for in-place loading
 - `AnyAOTIModel::try_into_typed::<D>()` — recover an `AOTIModel<D>` from the enum; works in `D`-generic code where a `match` can't narrow the type parameter
-- `load_metadata_from_package(path, name)` — free function, reads metadata without fully loading
+- `load_metadata_from_package(path, name)` — free function, reads metadata without fully loading; `load_metadata_from_extracted(dir, name)` for an extracted directory
 
 ### Key cxx bridge constraints
 
