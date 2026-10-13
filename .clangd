@@ -1,7 +1,11 @@
 CompileFlags:
+  # Relative -I paths resolve against the source file's directory, and all
+  # C++ sources live in csrc/, hence the ../ prefixes.  target/cxxbridge and
+  # target/libtorch are symlinks maintained by build.rs
   Add:
+    - -xc++
     - --std=c++17
-    - -Itarget/cxxbridge
-    - -Itarget/libtorch/include
-    - -Itarget/libtorch/include/torch/csrc/api/include
-    - -I.
+    - -I../target/cxxbridge
+    - -I../target/libtorch/include
+    - -I../target/libtorch/include/torch/csrc/api/include
+    - -I..

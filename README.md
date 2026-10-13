@@ -1,1 +1,1 @@
-Safe Rust bindings to PyTorch's AOT Inductor, compatible with [tch-rs](https://github.com/LaurentMazare/tch-rs).
+Safe Rust bindings to PyTorch's AOT Inductor, compatible with [tch-rs](https://github.com/LaurentMazare/tch-rs). Nearly all Claude-written, but used by [Transcribbit](https://www.transcribbit.com/).
